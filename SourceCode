@@ -114,10 +114,6 @@ void displayLCD() {
   lcd.print(soilMoist);
   lcd.setCursor(7, 1);
   lcd.print("%");
-  lcd.setCursor(9, 1);
-  lcd.print(ventAngle);
-  lcd.setCursor(12, 1);
-  lcd.print(waterLevel);
 }
 
 // Changes the size of the vent to holde the air moisture at the wanted level.

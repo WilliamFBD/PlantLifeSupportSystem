@@ -1,0 +1,262 @@
+// Librarys
+#include <DHT.h>
+#include <LiquidCrystal_I2C.h>
+#include <Servo.h>
+#include <Wire.h>
+
+// pins and types
+#define DHTPIN 2
+#define DHTTYPE DHT11
+#define HEATRELEPIN 4
+#define WATERRELEPIN 7
+#define SERVOPIN 3
+#define SOILHUMPIN A0
+#define WATERLEVELPIN A1
+#define BUZZERPIN 5
+
+// Constants
+const int sensorAirValue = 920;
+const int sensorWaterValue = 875;
+int ventAngle = 180;
+int ticksSinceHumDrop;
+int ticksSinceHumRise;
+int oldAirHum = 0;
+int oldTemp = 0;
+int test = 0;
+int ticksWithHeat = 0;
+int ticksSinceHeat = 0;
+int ticksWatering = 0;
+int ticksSinceWatering = 0;
+bool heatOn;
+bool watering;
+
+// Values
+// the tempereatur wanted in the growing envirement
+int wantedTemp = 28;
+// the wanted humidity in the dirt
+int wantedSoilHum = 90;
+// the wanted air humidity
+int wantedAirHum = 55;
+// the amount of time the program will wait before opening up the vent more to lower the humidity (times 2 sek each)
+int humCorrectingFactor = 10;
+// the maximum rate at which the humidity can drop per tick before the program closes down the vent to limit it
+int maxHumChangeDropRate = 1;
+// the maximum rate at which the humidity can rise per tick before the program opens up the vent to limit it
+int maxHumChangeRiseRate = 1;
+// the amount of ticks the heating lamp will be turned on before waiting and then checking the temp again for effect (2X sec each)
+int heatingTicks = 25;
+// the amount of ticks the program will wait for temperatur to equalize before doing a new addjustment (2X sec each)
+int waitAfterHeat = 15;
+// the amount of ticks the program will run the watering pump before waiting and then checking the moisture again
+int wateringTicks = 2;
+// the amount of ticks the program will wait after it runns the pump to let the soil absorb the moisture.
+int waitAfterWatering = 45;
+
+// Instances
+DHT dht(DHTPIN, DHTTYPE);
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+Servo servo;
+
+// Gets the temp from the sensor and returns it
+float getTemp() {
+  return dht.readTemperature();
+}
+// Gets the humidity from the sensor and returns it
+float getAirHum() {
+  return dht.readHumidity();
+}
+
+// Gets the analog signal from the soil moistur sensor, converts it to a humidity % and returns it
+float getSoilHum() {
+  float soilMoistureValue = analogRead(SOILHUMPIN);
+  int soilMoisturePercent = ((map(soilMoistureValue, sensorAirValue, sensorWaterValue, 0, 1000)) / 10);
+
+  if ( soilMoisturePercent >= 100) {
+    return 100.00;
+  }
+  else if (soilMoisturePercent <= 0) {
+    return 0.00;
+  }
+  else if (soilMoisturePercent < 100 && soilMoisturePercent > 0) {
+    return round(soilMoisturePercent * 100) / 100;
+  }
+}
+
+float getWaterLevel() {
+  return analogRead(WATERLEVELPIN);
+}
+
+// Makes the buzzer send out a 0.5 sec long 1000kHz beep
+void buzz() {
+   tone(BUZZERPIN, 1000, 500);
+}
+
+// Displayes the temp and hum on the LCD
+void displayLCD() {
+  float temp = getTemp();
+  float airHum = getAirHum();
+  float soilMoist = getSoilHum();
+  float waterLevel = getWaterLevel();
+  
+  lcd.clear();
+  lcd.backlight();
+  lcd.setCursor(0, 0);
+  lcd.print("A");
+  lcd.setCursor(2, 0);
+  lcd.print(airHum);
+  lcd.setCursor(7, 0);
+  lcd.print("%");
+  lcd.setCursor(10, 0);
+  lcd.print(temp);
+  lcd.setCursor(0, 1);
+  lcd.print("S");
+  lcd.setCursor(2, 1);
+  lcd.print(soilMoist);
+  lcd.setCursor(7, 1);
+  lcd.print("%");
+  lcd.setCursor(9, 1);
+  lcd.print(ventAngle);
+  lcd.setCursor(12, 1);
+  lcd.print(waterLevel);
+}
+
+// Changes the size of the vent to holde the air moisture at the wanted level.
+void regulateAirHum(){
+  int hum = getAirHum();
+  if (oldAirHum == 0){
+    oldAirHum = hum;
+  }
+  else{
+    if (hum > wantedAirHum) {
+      if (oldAirHum < hum) {
+        ventAngle -= 5;
+      }
+      else if (oldAirHum == hum) {
+        if (ticksSinceHumDrop == humCorrectingFactor) {
+          ventAngle -= 5;
+          ticksSinceHumDrop = 0;
+        }
+        else{
+          ticksSinceHumDrop++;
+        }
+      }
+      else if ((oldAirHum - maxHumChangeDropRate) > hum) {
+        ventAngle += 5;
+      }
+    }
+    else if (hum == wantedAirHum) {
+      if (oldAirHum > hum) {
+        ventAngle += 5;
+      }
+      else if (oldAirHum < hum) {
+        ventAngle -= 5;
+      }
+    }
+    else if (hum < wantedAirHum) {
+      if (oldAirHum > hum) {
+        ventAngle += 5;
+      }
+      else if (oldAirHum == hum) {
+        if (ticksSinceHumRise == humCorrectingFactor) {
+          ventAngle += 5;
+          ticksSinceHumRise = 0;
+        }
+        else{
+          ticksSinceHumRise++;
+        }
+      }
+      else if ((oldAirHum + maxHumChangeRiseRate) < hum) {
+        ventAngle -= 5;
+      }
+    }
+    oldAirHum = hum;
+    if (ventAngle > 180) {
+      ventAngle = 180;
+    }
+    else if (ventAngle < 25) {
+      ventAngle = 25;
+    }
+    servo.write(ventAngle);
+  }
+}
+
+// Regulates the air temperatur with the use of a heating bulb
+void regulateTemp() {
+  int temp = getTemp();
+  if (heatOn == true) {
+    ticksWithHeat++;
+    if (ticksWithHeat >= heatingTicks) {
+      digitalWrite(HEATRELEPIN, LOW);
+      ticksSinceHeat = 0;
+      heatOn = false;
+    }
+  }
+  else {
+    ticksSinceHeat++;
+    if(ticksSinceHeat >= waitAfterHeat) {
+      if (temp < wantedTemp) {
+        digitalWrite(HEATRELEPIN, HIGH);
+        ticksWithHeat = 0;
+        heatOn = true;
+      }
+    }
+  }
+}
+
+// Checks if the waterlevel in the reservoar is empty. allerts the user if this is the case
+void checkWaterLevel() {
+  float waterLevel = getWaterLevel();
+  if (waterLevel < 500) {
+    buzz();
+  }
+}
+
+// checks the soil moisture and acctivates the arigation pump if needed.
+void regulateSoilHum() {
+  float soilHum = getSoilHum();
+  if (watering == true) {
+    ticksWatering++;
+    if (ticksWatering >= wateringTicks) {
+      digitalWrite(WATERRELEPIN, LOW);
+      ticksSinceWatering = 0;
+      watering = false;
+      }
+  }
+  else {
+    ticksSinceWatering++;
+    if (ticksSinceWatering >= waitAfterWatering) {
+      if (soilHum < wantedSoilHum) {
+        digitalWrite(WATERRELEPIN, HIGH);
+        ticksWatering = 0;
+        watering = true;
+      }
+    }
+  }
+}
+
+
+void setup() {
+  // put your setup code here, to run once:
+  servo.attach(SERVOPIN);
+  pinMode(HEATRELEPIN, OUTPUT);
+  pinMode(WATERRELEPIN, OUTPUT);
+  pinMode(BUZZERPIN, OUTPUT);
+  dht.begin();
+  delay(50);
+  lcd.init();
+  servo.write(95);
+}
+
+void loop() {
+  // put your main code here, to run repeatedly:
+  regulateAirHum();
+  regulateTemp();
+  checkWaterLevel();
+  regulateSoilHum();
+
+  // Updates LCD keep at end of loop to get up to date info.
+  displayLCD();
+
+  // Tick speed of 2 sec (same as hum and temp sensor)
+  delay(2000);
+}
